@@ -9,17 +9,20 @@ import (
 // Runtime owns the lifecycle of registered components and coordinates reloads.
 // Product code still owns dependency meaning and configuration decoding.
 type Runtime struct {
-	mu         sync.Mutex
-	components []Component
-	reloadable map[string]Reloadable
-	reloadMu   sync.Mutex
-	started    bool
-	closed     bool
-	deps       map[string][]string
+	lifecycleMu sync.Mutex
+	mu          sync.Mutex
+	components  []Component
+	reloadable  map[string]Reloadable
+	reloadMu    sync.Mutex
+	started     bool
+	closed      bool
+	deps        map[string][]string
 }
 
 func (r *Runtime) AddWithDependencies(component Component, dependencies ...string) error {
-	if err := r.Add(component); err != nil {
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
+	if err := r.add(component); err != nil {
 		return err
 	}
 	r.mu.Lock()
@@ -32,11 +35,23 @@ func (r *Runtime) AddWithDependencies(component Component, dependencies ...strin
 }
 
 func (r *Runtime) Add(component Component) error {
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
+	return r.add(component)
+}
+
+func (r *Runtime) add(component Component) error {
 	if component == nil || component.Name() == "" {
 		return errors.New("gyre: component and name are required")
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.started {
+		return errors.New("gyre: cannot add component after runtime start")
+	}
+	if r.closed {
+		return E(CodeShuttingDown, "runtime", "add", false, nil)
+	}
 	for _, existing := range r.components {
 		if existing.Name() == component.Name() {
 			return errors.New("gyre: duplicate component " + component.Name())
@@ -53,6 +68,8 @@ func (r *Runtime) Add(component Component) error {
 }
 
 func (r *Runtime) Start(ctx context.Context) error {
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
@@ -70,8 +87,10 @@ func (r *Runtime) Start(ctx context.Context) error {
 	}
 	for i, component := range ordered {
 		if err := component.Start(ctx); err != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), DefaultShutdownTimeout)
+			defer cancel()
 			for ; i >= 0; i-- {
-				_ = ordered[i].Close(context.Background())
+				_ = ordered[i].Close(cleanupCtx)
 			}
 			return E(CodeInternal, component.Name(), "start", false, err)
 		}
@@ -140,9 +159,15 @@ func (r *Runtime) Reload(ctx context.Context, name string, envelope Envelope) (R
 	if err := envelope.Validate(); err != nil {
 		return ReloadResult{}, E(CodeConfigInvalid, name, "reload", false, err)
 	}
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
 	r.reloadMu.Lock()
 	defer r.reloadMu.Unlock()
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return ReloadResult{}, E(CodeShuttingDown, name, "reload", false, nil)
+	}
 	reloadable := r.reloadable[name]
 	r.mu.Unlock()
 	if reloadable == nil {
@@ -163,6 +188,8 @@ func (r *Runtime) Status() []Snapshot {
 }
 
 func (r *Runtime) Close(ctx context.Context) error {
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()

@@ -15,5 +15,12 @@ func ConformanceCheck(ctx context.Context, component Component) error {
 	if err := component.Close(ctx); err != nil {
 		return errors.New("gyre: close-before-start: " + err.Error())
 	}
+	if err := component.Close(ctx); err != nil {
+		return errors.New("gyre: repeated close: " + err.Error())
+	}
+	snapshot := component.Status()
+	if snapshot.Name != component.Name() || snapshot.Version != component.Version() {
+		return errors.New("gyre: status identity does not match component identity")
+	}
 	return nil
 }

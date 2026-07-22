@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.6.0
+
+- serialize runtime start, close, and component registration;
+- reject component registration after runtime startup;
+- add configurable, context-bounded shutdown;
+- coordinate admin apply and rollback with runtime reload before config commit;
+- preserve last-known-good config after rejected apply or rollback;
+- audit successful and failed apply, rollback, and dry-run operations;
+- recursively redact secret-bearing fields from admin config and watch output;
+- add the reusable `conformance` package for lifecycle, readiness, reload, and
+  shutdown contract testing;
+- add race-tested coverage for runtime HTTP, reload transactions, observers,
+  config transactions, and product conformance.
+
 ## v0.5.0
 
 - runtime component registry with dependency ordering;

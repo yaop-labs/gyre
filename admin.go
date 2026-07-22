@@ -1,9 +1,12 @@
 package gyre
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // AdminHandler exposes local, authenticated-by-the-host admin operations. It
@@ -21,7 +24,7 @@ func AdminHandler(store *ConfigStore, runtime *Runtime) http.Handler {
 			http.Error(w, "config not found", http.StatusNotFound)
 			return
 		}
-		writeJSON(w, cfg)
+		writeJSON(w, RedactEnvelope(cfg))
 	})
 	mux.HandleFunc("POST /config/apply", func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
@@ -29,7 +32,8 @@ func AdminHandler(store *ConfigStore, runtime *Runtime) http.Handler {
 			return
 		}
 		var request struct {
-			Expected uint64 `json:"expected_generation"`
+			Expected  uint64 `json:"expected_generation"`
+			Component string `json:"component,omitempty"`
 			Envelope
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)).Decode(&request); err != nil {
@@ -38,13 +42,16 @@ func AdminHandler(store *ConfigStore, runtime *Runtime) http.Handler {
 		}
 		if r.URL.Query().Get("dry_run") == "true" {
 			if err := store.Validate(request.Envelope, request.Expected); err != nil {
+				store.recordAudit("dry_run", request.Generation, err)
 				writeError(w, err)
 				return
 			}
+			store.recordAudit("dry_run", request.Generation, nil)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		if err := store.Apply(r.Context(), request.Envelope, request.Expected); err != nil {
+		apply := runtimeApply(runtime, request.Component)
+		if err := store.ApplyWith(r.Context(), request.Envelope, request.Expected, apply); err != nil {
 			writeError(w, err)
 			return
 		}
@@ -62,7 +69,7 @@ func AdminHandler(store *ConfigStore, runtime *Runtime) http.Handler {
 			return
 		}
 		for envelope := range store.Watch(r.Context()) {
-			_ = json.NewEncoder(w).Encode(envelope)
+			_ = json.NewEncoder(w).Encode(RedactEnvelope(envelope))
 			flusher.Flush()
 		}
 	})
@@ -76,7 +83,7 @@ func AdminHandler(store *ConfigStore, runtime *Runtime) http.Handler {
 			http.Error(w, "generation must be positive", http.StatusBadRequest)
 			return
 		}
-		if err := store.Rollback(r.Context(), generation); err != nil {
+		if err := store.RollbackWith(r.Context(), generation, runtimeApply(runtime, r.URL.Query().Get("component"))); err != nil {
 			writeError(w, err)
 			return
 		}
@@ -99,14 +106,29 @@ func AdminHandler(store *ConfigStore, runtime *Runtime) http.Handler {
 	return mux
 }
 
+func runtimeApply(runtime *Runtime, component string) ConfigApplyFunc {
+	if runtime == nil {
+		return nil
+	}
+	return func(ctx context.Context, envelope Envelope) error {
+		name := component
+		if name == "" {
+			name = strings.ToLower(envelope.Kind)
+		}
+		_, err := runtime.Reload(ctx, name, envelope)
+		return err
+	}
+}
+
 func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(value)
 }
 func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
-	if e, ok := err.(*Error); ok && e.Code == CodeUnavailable {
+	var typed *Error
+	if errors.As(err, &typed) && typed.Code == CodeUnavailable {
 		status = http.StatusServiceUnavailable
 	}
-	http.Error(w, err.Error(), status)
+	http.Error(w, safeErrorMessage(err), status)
 }

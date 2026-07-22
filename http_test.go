@@ -54,6 +54,12 @@ func TestHTTPHandler(t *testing.T) {
 
 func TestChecker(t *testing.T) {
 	var c gyre.Checker
+	if err := c.Add(gyre.Check{}); err == nil {
+		t.Fatal("expected invalid check error")
+	}
+	if err := c.Add(gyre.Check{Name: "live", Scope: gyre.ScopeLiveness, Check: func(context.Context) error { return errors.New("ignored") }}); err != nil {
+		t.Fatal(err)
+	}
 	if err := c.Add(gyre.Check{Name: "db", Scope: gyre.ScopeReadiness, Check: func(context.Context) error { return errors.New("down") }}); err != nil {
 		t.Fatal(err)
 	}

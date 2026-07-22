@@ -1,6 +1,10 @@
 package gyre
 
-import "fmt"
+import (
+	"context"
+	"errors"
+	"fmt"
+)
 
 type Code string
 
@@ -41,4 +45,15 @@ func (e *Error) Unwrap() error {
 
 func E(code Code, component, operation string, retryable bool, cause error) *Error {
 	return &Error{Code: code, Component: component, Operation: operation, Retryable: retryable, Cause: cause}
+}
+
+func safeErrorMessage(err error) string {
+	var typed *Error
+	if errors.As(err, &typed) {
+		return "gyre: " + string(typed.Code)
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err.Error()
+	}
+	return "gyre: operation failed"
 }
